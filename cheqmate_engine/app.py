@@ -520,14 +520,55 @@ async def analyze_submission(request: SubmissionRequest):
 
                 # Also scan student text for output/result sections
                 student_text_output = ""
-                output_match = re.search(r'(?:output|result|screen|terminal|console)[:\s]+(.{20,500})', text, re.IGNORECASE)
-                if output_match:
-                    student_text_output = output_match.group(0)
+                output_patterns_student = [
+                    r'(?:output|result|expected output|sample output|o/p)[:\s]+(.{10,500})',
+                    r'(?:screen|terminal|console)[:\s]+(.{10,500})',
+                ]
+                for pat in output_patterns_student:
+                    output_match = re.search(pat, text, re.IGNORECASE)
+                    if output_match:
+                        student_text_output = output_match.group(0)
+                        break
 
                 student_output_text = (student_image_ocr + " " + student_text_output).strip()
 
+                # Determine reference output: screenshot OCR > re-extract from PDF > text fallback
+                manual_output_ref = ""
+
                 if manual_screenshot_ocr.strip():
-                    expected_words = normalize_for_compare(manual_screenshot_ocr)
+                    manual_output_ref = manual_screenshot_ocr
+                else:
+                    # Try on-the-fly re-extraction from permanent PDF
+                    try:
+                        perm_fn = f"{request.course_id}_{grading_source['filename']}"
+                        perm_path = os.path.join(GLOBAL_SOURCES_DIR, perm_fn)
+                        if os.path.exists(perm_path):
+                            re_ocr = processor.extract_images_from_pages(perm_path, 1, 999)
+                            if re_ocr.strip():
+                                manual_output_ref = re_ocr
+                                # Update DB for future requests
+                                try:
+                                    storage.update_screenshot_ocr(
+                                        request.course_id,
+                                        grading_source['filename'],
+                                        re_ocr
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                # Text fallback: scan reference for output sections
+                if not manual_output_ref:
+                    ref_output_match = re.search(
+                        r'(?:output|result|expected output|sample output|screen)[:\s]+(.{10,500})',
+                        grading_full_text, re.IGNORECASE
+                    )
+                    if ref_output_match:
+                        manual_output_ref = ref_output_match.group(0)
+
+                if manual_output_ref:
+                    expected_words = normalize_for_compare(manual_output_ref)
                     student_words_out = normalize_for_compare(student_output_text)
                     if expected_words and student_words_out:
                         matched = sum(1 for w in expected_words if fuzzy_match(w, student_words_out))
@@ -538,7 +579,6 @@ async def analyze_submission(request: SubmissionRequest):
                         screenshot_score = 1.0
                     screenshot_weight = 0.3
                 else:
-                    # Manual has no screenshot OCR text — skip component
                     screenshot_score = 0.0
                     screenshot_weight = 0.0
 
@@ -588,72 +628,17 @@ async def analyze_submission(request: SubmissionRequest):
                     consistency_score = 1.0
 
                 code_score = keyword_score * 0.8 + consistency_score * 0.2
-                code_weight = 0.4 if screenshot_weight > 0 else 0.5
 
                 # No code AND no output = 0 score for Lab Performance
                 has_code = len(student_code) > 0
                 has_output = bool(student_image_ocr.strip() or student_text_output.strip())
                 no_evidence = not has_code and not has_output
 
-                # 3. Steps attempted — order + depth verification
-                step_patterns = [r'\bstep\s*\d+\b', r'\btask\s*\d+\b', r'\bquestion\s*\d+\b', r'\bexercise\s*\d+\b']
-                grading_text_lines = grading_full_text.lower().split('\n')
-                student_text_lines = text.lower().split('\n')
-
-                # Extract manual steps with position
-                manual_steps = []
-                for i, line in enumerate(grading_text_lines):
-                    for pattern in step_patterns:
-                        m = re.search(pattern, line.strip())
-                        if m:
-                            manual_steps.append((m.group(0), i))
-                            break
-
-                # Extract student steps with position
-                student_steps = []
-                for i, line in enumerate(student_text_lines):
-                    for pattern in step_patterns:
-                        m = re.search(pattern, line.strip())
-                        if m:
-                            student_steps.append((m.group(0), i))
-                            break
-
-                if manual_steps:
-                    # Count match (60%)
-                    matched_count = sum(1 for ms, _ in manual_steps if any(fuzzy_match(ms, [ss]) for ss, _ in student_steps))
-                    count_ratio = matched_count / len(manual_steps)
-
-                    # Order match (20%) — student steps in same relative order
-                    order_score = 1.0
-                    if len(student_steps) >= 2:
-                        student_positions = [s[1] for s in student_steps]
-                        inversions = sum(1 for a in range(len(student_positions)) for b in range(a+1, len(student_positions)) if student_positions[a] > student_positions[b])
-                        max_inversions = len(student_positions) * (len(student_positions) - 1) / 2
-                        order_score = 1.0 - (inversions / max_inversions) if max_inversions > 0 else 1.0
-
-                    # Content depth (20%) — average text length between steps
-                    depth_scores = []
-                    for idx, (step_text, step_pos) in enumerate(manual_steps):
-                        if idx < len(manual_steps) - 1:
-                            next_pos = manual_steps[idx + 1][1]
-                        else:
-                            next_pos = len(student_text_lines)
-                        chunk = student_text_lines[step_pos:min(step_pos + 15, next_pos)]
-                        content_len = sum(len(l.strip()) for l in chunk if l.strip())
-                        depth_scores.append(min(content_len / 100.0, 1.0))
-                    depth_score = sum(depth_scores) / len(depth_scores) if depth_scores else 0.5
-
-                    steps_score = count_ratio * 0.6 + order_score * 0.2 + depth_score * 0.2
+                # New formula: 70% code match + 30% output match
+                if screenshot_weight > 0:
+                    lab_perf_base_ratio = (code_score * 0.70) + (screenshot_score * 0.30)
                 else:
-                    steps_score = 0.0
-
-                steps_weight = 1.0 - screenshot_weight - code_weight
-
-                total_weight = screenshot_weight + code_weight + steps_weight
-                if total_weight > 0:
-                    lab_perf_base_ratio = (screenshot_score * screenshot_weight + code_score * code_weight + steps_score * steps_weight) / total_weight
-                else:
-                    lab_perf_base_ratio = 1.0
+                    lab_perf_base_ratio = code_score
                 
                 lab_performance_base = 1.0 + lab_perf_base_ratio * 1.7
 
@@ -746,7 +731,8 @@ async def analyze_submission(request: SubmissionRequest):
                 "lab_performance": {
                     "screenshot_score": round(screenshot_score, 4),
                     "code_score": round(code_score, 4),
-                    "steps_score": round(steps_score, 4),
+                    "code_weight": 0.70,
+                    "output_weight": 0.30,
                     "plag_penalty": round(plag_penalty, 4)
                 }
             },

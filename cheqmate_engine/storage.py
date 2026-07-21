@@ -254,6 +254,28 @@ class Storage:
             logger.error(f"Error updating global source sections after retries: {e}")
             raise
 
+    def update_screenshot_ocr(self, course_id, filename, screenshot_ocr_text):
+        """Update only the screenshot_ocr_text column for a global source"""
+        def _do_update():
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "UPDATE global_sources SET screenshot_ocr_text = ? WHERE course_id = ? AND filename = ?",
+                    (screenshot_ocr_text, course_id, filename)
+                )
+                conn.commit()
+                logger.info(f"Updated screenshot_ocr_text for {filename} in course {course_id}: {len(screenshot_ocr_text)} chars")
+                return True
+            except Exception as e:
+                conn.rollback()
+                raise
+        try:
+            return self._execute_with_retry(_do_update)
+        except Exception as e:
+            logger.error(f"Error updating screenshot_ocr_text: {e}")
+            raise
+
     def set_grading_global_source(self, course_id, filename):
         """Set a specific global source as the grading source for a course"""
         def _do_set():
