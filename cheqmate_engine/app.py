@@ -521,11 +521,11 @@ async def analyze_submission(request: SubmissionRequest):
                 # Also scan student text for output/result sections
                 student_text_output = ""
                 output_patterns_student = [
-                    r'(?:output|result|expected output|sample output|o/p)[:\s]+(.{10,500})',
-                    r'(?:screen|terminal|console)[:\s]+(.{10,500})',
+                    r'(?:output|result|expected output|sample output|o/p)[:\s]+(.{10,1000})',
+                    r'(?:screen|terminal|console)[:\s]+(.{10,1000})',
                 ]
                 for pat in output_patterns_student:
-                    output_match = re.search(pat, text, re.IGNORECASE)
+                    output_match = re.search(pat, text, re.IGNORECASE | re.DOTALL)
                     if output_match:
                         student_text_output = output_match.group(0)
                         break
@@ -561,21 +561,32 @@ async def analyze_submission(request: SubmissionRequest):
                 # Text fallback: scan reference for output sections
                 if not manual_output_ref:
                     ref_output_match = re.search(
-                        r'(?:output|result|expected output|sample output|screen)[:\s]+(.{10,500})',
-                        grading_full_text, re.IGNORECASE
+                        r'(?:output|result|expected output|sample output|screen)[:\s]+(.{10,1000})',
+                        grading_full_text, re.IGNORECASE | re.DOTALL
                     )
                     if ref_output_match:
                         manual_output_ref = ref_output_match.group(0)
 
                 if manual_output_ref:
                     expected_words = normalize_for_compare(manual_output_ref)
+                    DEVTOOLS_NOISE = {'elements', 'console', 'sources', 'network', 'performance',
+                                      'filter', 'default', 'levels', 'plow', 'qd', 'topy', 'b11',
+                                      'enabled', 'reload', 'live', 'html', 'issue', 'ad'}
+                    REF_NAMES = {'harsh', 'patil'}
+                    expected_words = expected_words - DEVTOOLS_NOISE - REF_NAMES
                     student_words_out = normalize_for_compare(student_output_text)
                     if expected_words and student_words_out:
-                        matched = sum(1 for w in expected_words if fuzzy_match(w, student_words_out))
+                        matched_set = {w for w in expected_words if fuzzy_match(w, student_words_out)}
+                        matched = len(matched_set)
+                        missing_output_set = expected_words - matched_set
                         screenshot_score = max(0.3, matched / len(expected_words))
                     elif expected_words and not student_words_out:
+                        matched_set = set()
+                        missing_output_set = expected_words
                         screenshot_score = 0.0
                     else:
+                        matched_set = set()
+                        missing_output_set = set()
                         screenshot_score = 1.0
                     screenshot_weight = 0.3
                 else:
@@ -608,6 +619,7 @@ async def analyze_submission(request: SubmissionRequest):
                 output_patterns = [
                     r'print\s*\(\s*["\'](.+?)["\']',
                     r'console\.log\s*\(\s*["\'](.+?)["\']',
+                    r'console\.log\s*\(\s*`(.+?)`',
                     r'System\.out\.println\s*\(\s*"(.+?)"',
                     r'echo\s+["\'](.+?)["\']',
                 ]
@@ -640,7 +652,7 @@ async def analyze_submission(request: SubmissionRequest):
                 else:
                     lab_perf_base_ratio = code_score
                 
-                lab_performance_base = 1.0 + lab_perf_base_ratio * 1.7
+                lab_performance_base = 1.0 + lab_perf_base_ratio * 2.0
 
                 # No code AND no output → 0 score
                 if no_evidence:
@@ -733,7 +745,20 @@ async def analyze_submission(request: SubmissionRequest):
                     "code_score": round(code_score, 4),
                     "code_weight": 0.70,
                     "output_weight": 0.30,
-                    "plag_penalty": round(plag_penalty, 4)
+                    "plag_penalty": round(plag_penalty, 4),
+                    "keyword_score": round(keyword_score, 4),
+                    "consistency_score": round(consistency_score, 4),
+                    "matched_keyword_count": len(student_code.intersection(grading_code)) if grading_code else 0,
+                    "total_keyword_count": len(grading_code) if grading_code else 0,
+                    "matched_keywords": sorted(list(student_code.intersection(grading_code))) if grading_code else [],
+                    "missing_keywords": sorted(list(grading_code - student_code)) if grading_code else [],
+                    "matched_output_words": matched if manual_output_ref and expected_words and student_words_out else 0,
+                    "total_output_words": len(expected_words) if manual_output_ref and expected_words else 0,
+                    "matched_output_keywords": sorted(list(matched_set)) if manual_output_ref and expected_words and student_words_out else [],
+                    "missing_output_keywords": sorted(list(missing_output_set)) if manual_output_ref and expected_words and student_words_out else [],
+                    "combined_ratio": round(lab_perf_base_ratio, 4),
+                    "base_score_before_penalty": round(lab_performance_base, 4),
+                    "ai_probability": round(ai_prob, 2)
                 }
             },
             "message": "Analysis successful"

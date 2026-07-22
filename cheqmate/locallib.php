@@ -1083,19 +1083,83 @@ class assign_submission_cheqmate extends assign_submission_plugin
                 }
                 $output .= '<br/>';
 
-                // 3. Lab Performance
+                // 3. Lab Performance - Detailed Breakdown Table
                 $output .= '<strong>3. Lab Performance:</strong> ';
                 if ($grading_details && isset($grading_details['lab_performance'])) {
-                    $lp_details = $grading_details['lab_performance'];
-                    $output .= 'Score: ' . ($lp_score !== null ? round($lp_score, 2) . '/3.0. ' : 'N/A. ');
-                    $student_imgs = $lp_details['student_images'] ?? 0;
-                    $expected_imgs = $lp_details['expected_images'] ?? 0;
-                    $output .= 'Screenshots: ' . $student_imgs . '/' . $expected_imgs . ' found. ';
-                    $output .= 'Code Match: ' . round(($lp_details['code_score'] ?? 0) * 100, 1) . '%. ';
-                    $output .= 'Steps Attempted: ' . round(($lp_details['steps_score'] ?? 0) * 100, 1) . '%. ';
-                    if (isset($lp_details['penalty_factor']) && $lp_details['penalty_factor'] < 1.0) {
-                        $output .= ' <span class="text-danger" style="font-weight: bold;">Plagiarism/AI Penalty factor of ' . $lp_details['penalty_factor'] . ' applied.</span>';
+                    $lp = $grading_details['lab_performance'];
+                    $kw_matched = $lp['matched_keyword_count'] ?? 0;
+                    $kw_total = $lp['total_keyword_count'] ?? 0;
+                    $kw_score = $lp['keyword_score'] ?? 0;
+                    $cons_score = $lp['consistency_score'] ?? 0;
+                    $code_sc = $lp['code_score'] ?? 0;
+                    $scr_sc = $lp['screenshot_score'] ?? 0;
+                    $ratio = $lp['combined_ratio'] ?? 0;
+                    $base_before = $lp['base_score_before_penalty'] ?? 0;
+                    $penalty = $lp['plag_penalty'] ?? 0;
+                    $ai_p = $lp['ai_probability'] ?? 0;
+                    $matched_kws = $lp['matched_keywords'] ?? [];
+                    $missing_kws = $lp['missing_keywords'] ?? [];
+                    $out_matched = $lp['matched_output_words'] ?? 0;
+                    $out_total = $lp['total_output_words'] ?? 0;
+                    $out_matched_kws = $lp['matched_output_keywords'] ?? [];
+                    $out_missing_kws = $lp['missing_output_keywords'] ?? [];
+                    $cw = $lp['code_weight'] ?? 0.70;
+                    $ow = $lp['output_weight'] ?? 0.30;
+
+                    $output .= '<span style="font-size:1.1em; font-weight:bold;">' . ($lp_score !== null ? round($lp_score, 2) . '/3.0' : 'N/A') . '</span><br/>';
+                    $output .= '<table style="border-collapse:collapse; width:100%; margin:6px 0; font-size:0.82em;">';
+                    $output .= '<tr style="background:#e2e3e5;"><th style="border:1px solid #ccc; padding:4px 6px; text-align:left;">Step</th><th style="border:1px solid #ccc; padding:4px 6px; text-align:left;">What</th><th style="border:1px solid #ccc; padding:4px 6px; text-align:left;">Score</th><th style="border:1px solid #ccc; padding:4px 6px; text-align:left;">How</th></tr>';
+
+                    // Step 1
+                    $how1 = 'Matched: ' . implode(', ', $matched_kws);
+                    if (!empty($missing_kws)) { $how1 .= '. Missing: ' . implode(', ', $missing_kws); }
+                    $output .= '<tr><td style="border:1px solid #ccc; padding:4px 6px;">1</td><td style="border:1px solid #ccc; padding:4px 6px;">Keyword Match</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . $kw_matched . '/' . $kw_total . ' = ' . round($kw_score, 2) . '</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . htmlspecialchars($how1) . '</td></tr>';
+
+                    // Step 2
+                    $how2 = ($cons_score >= 1.0) ? 'Print values match output' : (($cons_score > 0) ? 'Some print values found in output' : 'No quoted print strings found');
+                    $output .= '<tr><td style="border:1px solid #ccc; padding:4px 6px;">2</td><td style="border:1px solid #ccc; padding:4px 6px;">Consistency (code&#8594;output)</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . round($cons_score, 2) . '</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . $how2 . '</td></tr>';
+
+                    // Step 3
+                    $output .= '<tr><td style="border:1px solid #ccc; padding:4px 6px;">3</td><td style="border:1px solid #ccc; padding:4px 6px;">Code Score</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;"><strong>' . round($code_sc, 2) . '</strong></td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . round($kw_score, 2) . '&times;0.8 + ' . round($cons_score, 2) . '&times;0.2 = ' . round($code_sc, 2) . '</td></tr>';
+
+                    // Step 4
+                    if ($out_total > 0) {
+                        $how4 = 'Matched: ' . implode(', ', $out_matched_kws);
+                        if (!empty($out_missing_kws)) { $how4 .= '. Missing: ' . implode(', ', $out_missing_kws); }
+                    } else {
+                        $how4 = ($scr_sc >= 1.0) ? 'No reference output to compare (defaults to 1.0)' : (($scr_sc > 0.1) ? 'Min floor applied (0.3)' : 'No output comparison possible');
                     }
+                    $output .= '<tr><td style="border:1px solid #ccc; padding:4px 6px;">4</td><td style="border:1px solid #ccc; padding:4px 6px;">Output Match</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . round($scr_sc, 2) . '</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . $how4 . '</td></tr>';
+
+                    // Step 5
+                    $output .= '<tr><td style="border:1px solid #ccc; padding:4px 6px;">5</td><td style="border:1px solid #ccc; padding:4px 6px;">Combined (' . intval($cw * 100) . '/' . intval($ow * 100) . ')</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . round($ratio, 2) . '</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . round($code_sc, 2) . '&times;' . $cw . ' + ' . round($scr_sc, 2) . '&times;' . $ow . ' = ' . round($ratio, 2) . '</td></tr>';
+
+                    // Step 6
+                    $output .= '<tr><td style="border:1px solid #ccc; padding:4px 6px;">6</td><td style="border:1px solid #ccc; padding:4px 6px;">Scale to range</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . round($base_before, 2) . '</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">1.0 + (' . round($ratio, 2) . ' &times; 2.0) = ' . round($base_before, 2) . '</td></tr>';
+
+                    // Step 7
+                    $output .= '<tr><td style="border:1px solid #ccc; padding:4px 6px;">7</td><td style="border:1px solid #ccc; padding:4px 6px;">AI/Plagiarism Penalty</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px; color:red;">-' . round($penalty, 3) . '</td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">(' . round($ai_p, 2) . ' - 10) / 90 = ' . round($penalty, 3) . '</td></tr>';
+
+                    // Step 8
+                    $output .= '<tr style="background:#d4edda;"><td style="border:1px solid #ccc; padding:4px 6px;">8</td><td style="border:1px solid #ccc; padding:4px 6px;"><strong>Lab Performance</strong></td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;"><strong>' . ($lp_score !== null ? round($lp_score, 2) : 'N/A') . '</strong></td>';
+                    $output .= '<td style="border:1px solid #ccc; padding:4px 6px;">' . round($base_before, 2) . ' - ' . round($penalty, 3) . ' = <strong>' . ($lp_score !== null ? round($lp_score, 2) : 'N/A') . '</strong></td></tr>';
+
+                    $output .= '</table>';
                 } else {
                     $output .= 'Score: ' . ($lp_score !== null ? round($lp_score, 2) . '/3.0.' : 'N/A.');
                 }
